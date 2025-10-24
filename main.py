@@ -1,12 +1,15 @@
 # app.py
 
-import queue
 import streamlit as st
-import pydub
+import soundfile as sf
+import numpy as np
 import time
 import json
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
 from io import BytesIO
+try:
+    from streamlit_audiorec import st_audiorec
+except ImportError:
+    st_audiorec = None
 
 # Local imports
 from services.transcription_service import TranscriptionService
@@ -69,13 +72,6 @@ def initialize_session_state():
         st.session_state.edited_transcript = None
         st.session_state.gemini_result = None
 
-        # Live recording state
-        st.session_state.is_recording = False
-        st.session_state.is_paused = False
-        st.session_state.start_time = 0
-        st.session_state.total_paused_duration = 0
-        st.session_state.pause_start_time = 0
-
 
 # --- CORE PROCESSING LOGIC ---
 
@@ -84,13 +80,52 @@ def process_audio_upload(uploaded_file):
     """Handles the processing of an uploaded audio file."""
     with st.spinner("Processing uploaded audio file..."):
         try:
-            audio_segment = pydub.AudioSegment.from_file(uploaded_file)
-            st.session_state.audio_buffer = audio_segment
+            # Reset file pointer
+            uploaded_file.seek(0)
+            
+            # Try different approaches based on file type
+            file_extension = uploaded_file.name.lower().split('.')[-1]
+            
+            if file_extension in ['m4a', 'mp4', 'aac']:
+                # For M4A files, show conversion message
+                st.error("❌ M4A format not directly supported by soundfile.")
+                st.info("🔄 **Solution Options:**")
+                st.markdown("""
+                1. **Online Converter:** Use [CloudConvert](https://cloudconvert.com/m4a-to-wav) to convert M4A → WAV
+                2. **Local Tools:** Use VLC, Audacity, or FFmpeg to convert
+                3. **Command Line:** `ffmpeg -i input.m4a output.wav`
+                """)
+                st.warning("Please convert your file to WAV format and upload again.")
+                return
+            
+            # Read audio using soundfile
+            audio_data, sample_rate = sf.read(uploaded_file)
+            
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1:
+                audio_data = np.mean(audio_data, axis=1)
+            
+            # Ensure audio data is not empty
+            if len(audio_data) == 0:
+                st.error("❌ Audio file appears to be empty or corrupted.")
+                return
+            
+            # Store as dict with data and sample rate
+            st.session_state.audio_buffer = {
+                'data': audio_data,
+                'sample_rate': sample_rate
+            }
             st.toast("✅ Audio processed successfully!", icon="🎵")
             st.session_state.current_step = "transcribe"
             st.rerun()
+            
+        except sf.LibsndfileError as e:
+            st.error(f"❌ Unsupported audio format: {uploaded_file.name}")
+            st.info("💡 **Supported formats:** WAV, FLAC")
+            st.info("🔄 **For MP3/M4A:** Please convert to WAV format first")
         except Exception as e:
             st.error(f"❌ Failed to process audio file: {e}")
+            st.info("💡 Try converting your file to WAV format for best compatibility.")
 
 
 def run_transcription():
@@ -98,8 +133,11 @@ def run_transcription():
     if st.session_state.audio_buffer:
         with st.spinner("🤖 Transcribing audio... This may take a few minutes."):
             try:
-                audio_bytes = st.session_state.audio_buffer.export(format="wav").read()
-                audio_file_like = BytesIO(audio_bytes)
+                # Convert audio data to WAV bytes
+                audio_buffer = st.session_state.audio_buffer
+                audio_file_like = BytesIO()
+                sf.write(audio_file_like, audio_buffer['data'], audio_buffer['sample_rate'], format='WAV')
+                audio_file_like.seek(0)
                 audio_file_like.name = "processed_audio.wav"
 
                 transcript_text = (
@@ -174,6 +212,8 @@ def render_sidebar():
                     "gemini_service",
                 ]:
                     del st.session_state[key]
+            # Reinitialize session state
+            initialize_session_state()
             st.rerun()
 
 
@@ -214,99 +254,62 @@ def render_input_view():
 
 
 def render_live_recorder():
-    """UI for live audio recording with pause/resume."""
+    """UI for live audio recording using streamlit-audiorec."""
+
+    
     st.subheader("Live Audio Recorder")
-    webrtc_ctx = webrtc_streamer(
-        key="live-recorder",
-        mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=1024,
-        media_stream_constraints={"audio": True, "video": False},
-    )
-
-    if webrtc_ctx.state.playing and not st.session_state.is_recording:
-        st.session_state.is_recording = True
-        st.session_state.start_time = time.time()
-        st.rerun()
-    elif not webrtc_ctx.state.playing and st.session_state.is_recording:
-        st.session_state.is_recording = False
-        st.session_state.is_paused = False
-        st.rerun()
-
-    status_indicator = st.empty()
-    timer_placeholder = st.empty()
-
-    if st.session_state.is_recording:
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            pause_resume_text = "▶️ Resume" if st.session_state.is_paused else "⏸️ Pause"
-            if st.button(pause_resume_text, use_container_width=True):
-                st.session_state.is_paused = not st.session_state.is_paused
-                if st.session_state.is_paused:
-                    st.session_state.pause_start_time = time.time()
-                else:
-                    st.session_state.total_paused_duration += (
-                        time.time() - st.session_state.pause_start_time
-                    )
+    st.info("🎙️ Click the record button below to start recording")
+    
+    # Audio recorder component
+    wav_audio_data = st_audiorec()
+    
+    if wav_audio_data is not None:
+        try:
+            # Convert bytes to numpy array
+            audio_file = BytesIO(wav_audio_data)
+            audio_data, sample_rate = sf.read(audio_file)
+            
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1:
+                audio_data = np.mean(audio_data, axis=1)
+            
+            # Store in session state
+            st.session_state.audio_buffer = {
+                'data': audio_data,
+                'sample_rate': sample_rate
+            }
+            
+            # Show audio info
+            duration = len(audio_data) / sample_rate
+            max_amplitude = np.max(np.abs(audio_data)) if len(audio_data) > 0 else 0
+            
+            st.success("✅ Recording captured successfully!")
+            st.info(f"📊 Duration: {format_time(duration)} | Sample Rate: {sample_rate} Hz | Max Amplitude: {max_amplitude:.4f}")
+            
+            # Play recorded audio
+            st.audio(wav_audio_data, format="audio/wav")
+            
+            if st.button(
+                "Continue to Transcription ➡️", type="primary", use_container_width=True
+            ):
+                st.session_state.current_step = "transcribe"
                 st.rerun()
-
-        # This while loop is for continuous UI update, not for blocking processing
-        while st.session_state.is_recording:
-            if st.session_state.is_paused:
-                status_indicator.warning("⏸️ RECORDING PAUSED")
-            else:
-                status_indicator.success("🎤 Recording...")
-                # Accumulate audio frames only when not paused
-                if webrtc_ctx.audio_receiver:
-                    try:
-                        audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=0.1)
-                        sound_chunk = pydub.AudioSegment.empty()
-                        for frame in audio_frames:
-                            sound = pydub.AudioSegment(
-                                frame.to_ndarray().tobytes(),
-                                sample_width=frame.format.bytes,
-                                frame_rate=frame.sample_rate,
-                                channels=len(frame.layout.channels),
-                            )
-                            sound_chunk += sound
-                        if len(sound_chunk) > 0:
-                            st.session_state.audio_buffer = (
-                                st.session_state.audio_buffer
-                                or pydub.AudioSegment.empty()
-                            ) + sound_chunk
-                    except queue.Empty:
-                        pass
-
-            # Update timer
-            now = time.time()
-            elapsed_time = (
-                now
-                - st.session_state.start_time
-                - st.session_state.total_paused_duration
-            )
-            if st.session_state.is_paused:
-                elapsed_time -= now - st.session_state.pause_start_time
-            timer_placeholder.info(f"⏱️ Duration: {format_time(elapsed_time)}")
-            time.sleep(0.5)
-
-    elif st.session_state.audio_buffer:
-        status_indicator.info("✅ Recording finished.")
-        st.audio(
-            st.session_state.audio_buffer.export(format="wav").read(),
-            format="audio/wav",
-        )
-        if st.button(
-            "Continue to Transcription ➡️", type="primary", use_container_width=True
-        ):
-            st.session_state.current_step = "transcribe"
-            st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error processing recorded audio: {e}")
+    else:
+        st.info("📊 No recording yet. Use the recorder above to capture audio.")
 
 
 def render_file_uploader():
     """UI for uploading an audio file."""
     st.subheader("Upload Audio File")
+    st.info("📋 **Recommended:** WAV or FLAC format for best compatibility")
+    st.warning("⚠️ **Note:** M4A files need conversion to WAV first")
+    
     uploaded_file = st.file_uploader(
-        "Choose audio file (WAV, MP3, M4A, FLAC)",
-        type=["wav", "mp3", "m4a", "flac"],
+        "Choose audio file (WAV, FLAC recommended)",
+        type=["wav", "flac", "mp3", "m4a"],
         label_visibility="collapsed",
     )
     if uploaded_file:
@@ -326,9 +329,15 @@ def render_transcription_view():
     st.info(
         "Your audio is ready for transcription. This may take a few minutes for long recordings."
     )
-    st.audio(
-        st.session_state.audio_buffer.export(format="wav").read(), format="audio/wav"
-    )
+    
+    try:
+        # Convert audio buffer to bytes for playback
+        audio_buffer = st.session_state.audio_buffer
+        audio_bytes = BytesIO()
+        sf.write(audio_bytes, audio_buffer['data'], audio_buffer['sample_rate'], format='WAV')
+        st.audio(audio_bytes.getvalue(), format="audio/wav")
+    except Exception as e:
+        st.warning(f"Could not preview audio: {e}")
     if st.button("🎙️ **Start Transcription**", type="primary", use_container_width=True):
         run_transcription()
 
@@ -399,7 +408,11 @@ def render_export_view():
             use_container_width=True,
         )
     with tab3:
-        audio_bytes = audio_buffer.export(format="wav").read()
+        # Convert audio buffer to bytes
+        audio_bytes_io = BytesIO()
+        sf.write(audio_bytes_io, audio_buffer['data'], audio_buffer['sample_rate'], format='WAV')
+        audio_bytes = audio_bytes_io.getvalue()
+        
         st.audio(audio_bytes, format="audio/wav")
         st.download_button(
             "🎵 Download Audio (.wav)",

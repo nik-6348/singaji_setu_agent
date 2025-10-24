@@ -1,6 +1,7 @@
 import streamlit as st
 import io
-from pydub import AudioSegment
+import soundfile as sf
+import numpy as np
 from typing import List, Tuple, Optional
 
 # Constants
@@ -22,23 +23,39 @@ def process_audio_and_chunk(
     """
     try:
         st.info("🔄 Processing and chunking audio file...")
-        audio = AudioSegment.from_file(uploaded_file).set_channels(1)
-        chunk_length_ms = chunk_length_seconds * 1000
-        chunks = [
-            audio[i : i + chunk_length_ms]
-            for i in range(0, len(audio), chunk_length_ms)
-        ]
+        
+        # Read audio using soundfile (lighter than pydub)
+        uploaded_file.seek(0)
+        audio_data, sample_rate = sf.read(uploaded_file)
+        
+        # Convert to mono if stereo
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        # Calculate chunk size in samples
+        chunk_size_samples = int(chunk_length_seconds * sample_rate)
+        total_samples = len(audio_data)
+        
         chunk_data = []
-        for i, chunk in enumerate(chunks):
-            start_time_s = (i * chunk_length_ms) / 1000
-            end_time_s = start_time_s + (len(chunk) / 1000)
+        for i in range(0, total_samples, chunk_size_samples):
+            chunk = audio_data[i:i + chunk_size_samples]
+            
+            # Calculate time labels
+            start_time_s = i / sample_rate
+            end_time_s = (i + len(chunk)) / sample_rate
             time_label = f"{start_time_s:.1f}s - {end_time_s:.1f}s"
+            
+            # Create WAV buffer
             buffer = io.BytesIO()
-            chunk.export(buffer, format="wav")
+            sf.write(buffer, chunk, sample_rate, format='WAV')
             buffer.seek(0)
+            
             chunk_data.append((buffer, time_label))
-        st.success(f"✅ Audio split into {len(chunks)} chunks of {chunk_length_seconds}s each.")
+        
+        num_chunks = len(chunk_data)
+        st.success(f"✅ Audio split into {num_chunks} chunks of {chunk_length_seconds}s each.")
         return chunk_data
+        
     except Exception as e:
         st.error(f"Audio processing error: {e}")
         return None

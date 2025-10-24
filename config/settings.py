@@ -20,7 +20,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # Google Cloud Storage settings
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-GCP_LOCATION = os.getenv("GCP_LOCATION")
+GCP_LOCATION = os.getenv("GCP_REGION", "asia-south1")  # Use GCP_REGION from .env
 
 
 # Validate required environment variables
@@ -128,7 +128,11 @@ GEMINI_TEMPERATURE = 0.1
 
 # Audio processing settings
 MAX_SYNC_DURATION_SECONDS = 59
-SUPPORTED_AUDIO_FORMATS = ["wav", "mp3", "m4a", "flac"]
+SUPPORTED_AUDIO_FORMATS = ["wav", "flac"]  # Fully supported by soundfile
+PARTIAL_SUPPORT_FORMATS = ["mp3", "m4a"]  # Need conversion
+
+# Debug settings
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # Speech recognition settings
 DEFAULT_LANGUAGE_CODE = "hi-IN"
